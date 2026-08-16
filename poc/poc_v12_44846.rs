@@ -6,18 +6,21 @@
 //! Claim under test: in internal_liquidation_call, collateral_cap_triggered is
 //! set when the collateral computed FOR THE SELECTED collateral_asset exceeds
 //! the user's balance OF THAT ASSET. The code then treats that single-asset
-//! exhaustion as whole-portfolio exhaustion: it adjusts debt_to_cover to cover
-//! ALL of the user's remaining debt (N-08 adjustment) and burns the rest as
-//! protocol bad debt (H-02/H-05 branch). In a multi-collateral account the
-//! user may still hold large other collateral, so a liquidator who selects a
-//! small (dust) secondary collateral asset causes the protocol to forgive
-//! debt that is fully backed by the user's remaining collateral. The user
-//! keeps the other collateral AND the debt is erased into reserve deficit.
+//! exhaustion as whole-portfolio exhaustion: it adjusts debt_to_cover to the
+//! amount corresponding to the selected asset's full balance (N-08) and burns
+//! the user's remaining balance of that debt asset as protocol bad debt
+//! (H-02/H-05). In a multi-collateral account the user may still hold large
+//! other collateral, so a liquidator who selects a small (dust) secondary
+//! collateral asset causes the protocol to forgive debt that is fully backed
+//! by the user's remaining collateral. The user keeps the other collateral
+//! AND the debt is erased into reserve deficit.
 //!
-//! This test asserts the CORRECT behavior (withdrawal of remaining collateral
-//! after such a liquidation must FAIL, because the debt has not been erased
-//! ... which it has not: the bug means it WAS erased, so this test FAILS on
-//! buggy code and documents the exploit).
+//! This test CONFIRMS that buggy end-state (it passes on the shipped
+//! snapshot): after the dust-asset liquidation the user's remaining debt is
+//! ~0, the deficit is positive, and the user can still withdraw their
+//! primary collateral debt-free. On a fixed implementation (single-asset
+//! exhaustion does not write off the whole position's debt) this test would
+//! FAIL.
 //!
 //! Numbers (7-decimal tokens, prices in 14 decimals, WAD=1e18, LT=8500 bps,
 //! LTV=8000, bonus=500 bps, default partial-liq threshold 0.5 WAD):
@@ -45,25 +48,28 @@
 //!       But close factor cap: debt_to_cover <= 0.5 * individual_debt_base
 //!         (individual debt of B = $8000) => up to $4000 allowed.
 //!       Choose debt_to_cover = 100 (worth $100):
-//!         collateral_to_transfer = 100 * 1.05 = 105 > 100 (C balance)
+//!         The required collateral is computed on VALUE then converted to C
+//!         tokens at C's discounted price:
+//!           $100 * 1.05 (bonus) = $105 -> / $0.90 = 116.67 C.
+//!         collateral_to_transfer = 116.67 C > 100 C (C balance)
 //!         => collateral_cap_triggered = TRUE.
-//!       N-08 adjustment: adjusted_debt = ceil(100 * 100 / 105) = ceil(95.24)
-//!         = 96  (debt units of B, 7 decimals: 100 tokens)
-//!         Wait — the adjustment uses raw token amounts:
-//!         dtc=100, ucb=100 (C balance), cat=105:
-//!         adjusted = (100*100 + 105 - 1)/105 = 10099/105 = 96.18 -> 96.
-//!         So only 96 of debt is repaid?? That would make the exploit SMALLER.
+//!       N-08 adjustment: adjusted_debt = ceil(100 * 100 / 116.67) = 85.71 B.
+//!         The liquidator repays 85.71 B and receives the user's full 100 C.
+//!         (In raw token amounts: dtc=100e7, ucb=100e7, cat=1166666666 ->
+//!          (100e7*100e7 + cat - 1)/cat = 85.714286e7, i.e. 85.714286 B.)
 //!
-//! Hold on — re-read the N-08 branch. The adjustment SCALES debt_to_cover DOWN
-//! to the amount that exactly corresponds to the user's full C balance:
-//! adjusted_debt = ceil(dtc * ucb / cat). With cat > ucb, adjusted < dtc.
-//! So the liquidator only pays 96 (worth $96), seizes all 100 C, and then...
-//! remaining_debt = 8000 - 96 = 7904 > 0 AND collateral_cap_triggered, so the
-//! H-02/H-05 branch burns the ENTIRE remaining 7904 as bad debt / deficit.
+//! The N-08 branch scales debt_to_cover DOWN to the amount that corresponds
+//! to the user's full C balance: adjusted_debt = ceil(dtc * ucb / cat). With
+//! cat > ucb, adjusted < dtc. So the liquidator only pays 85.71 (worth ~$86)
+//! and seizes all 100 C (worth ~$90), and then...
+//! remaining_debt = 8000 - 85.71 = 7914.29 > 0 AND collateral_cap_triggered,
+//! so the H-02/H-05 branch burns the ENTIRE remaining 7914.29 as bad debt /
+//! reserve deficit (scoped to the selected debt asset B).
 //!
-//! NET EFFECT: the liquidator paid ~$96 and erased ~$7,904 of debt. The user
-//! keeps their 10,000 A (worth $9,000 at $0.90) and can withdraw it freely —
-//! the position now shows 0 debt. The pool absorbs ~$7,904 as deficit.
+//! NET EFFECT: the liquidator paid ~$86 and erased ~$7,914 of debt (B). The
+//! user keeps their 10,000 A (worth $9,000 at $0.90) and can withdraw it
+//! freely — the position now shows ~0 debt in B. The pool absorbs ~$7,914
+//! as deficit.
 //!
 //! Correct behavior would be: seizing C (the only collateral offered) should
 //! at most liquidate the debt proportionate to C's share of the portfolio,
@@ -283,7 +289,7 @@ fn poc_44846_single_asset_cap_forgives_all_debt() {
     let b_amt = 8_000 * D7;
     router.borrow(&user, &asset_b, &b_amt, &1u32, &0u32, &user);
 
-    // Liquidator needs B to repay: 200 is plenty (we pay ~96)
+    // Liquidator needs B to repay: 200 is plenty (we pay ~85.71)
     mint_and_approve(&env, &asset_b, &router_addr, &liquidator, 200 * D7);
 
     let pre = router.get_user_account_data(&user);
@@ -306,7 +312,7 @@ fn poc_44846_single_asset_cap_forgives_all_debt() {
     );
 
     // Liquidator picks DUST collateral C and requests 100 B (worth $100).
-    // collateral_to_transfer = 100 * 1.05 = 105 > 100 (C balance) => cap triggers.
+    // collateral_to_transfer = 116.67 C > 100 C (C balance) => cap triggers.
     let dtc = 100 * D7;
     let result = router.try_liquidation_call(
         &liquidator,
@@ -324,7 +330,7 @@ fn poc_44846_single_asset_cap_forgives_all_debt() {
     let post = router.get_user_account_data(&user);
     let deficit = router.get_reserve_deficit(&asset_b);
 
-    // The bug: remaining debt (~7,904) was burned into deficit.
+    // The bug: remaining debt (7,914.29) was burned into deficit.
     assert!(
         post.total_debt_base < 10 * D7,
         "BUG CONFIRMED if true: debt erased (was 8000, now {})",
@@ -332,7 +338,7 @@ fn poc_44846_single_asset_cap_forgives_all_debt() {
     );
     assert!(
         deficit > 7_000 * D7,
-        "BUG CONFIRMED if true: ~7900 moved to reserve deficit (deficit={})",
+        "BUG CONFIRMED if true: ~7914 moved to reserve deficit (deficit={})",
         deficit
     );
 

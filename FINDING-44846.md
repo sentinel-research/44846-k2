@@ -1,9 +1,11 @@
 # FINDING — K2 Lend (Stellar/Soroban): single-asset collateral-cap
 # forgiveness erases all remaining debt in a multi-collateral position
 
-- Severity (self-assessed): **High / Critical** (direct protocol fund loss:
-  outstanding debt forgiven into reserve deficit while the borrower keeps
-  collateral).
+- Severity (self-assessed): **High** (direct protocol fund loss: the
+  remaining balance of the selected debt asset is forgiven into reserve
+  deficit while the borrower keeps other collateral). The contest's V12
+  note classified it Critical (Unreviewed); this report self-assesses High
+  as a confirmed reproduction + patch-status request.
 - Source: V12 AI-audit note **#44846** ("Single-asset cap check wrongfully
   forgives all remaining debt"), marked **Validity: Unreviewed** in the
   Code4rena `2026-04-k2` contest repo. Independently re-verified this tick
@@ -22,14 +24,16 @@
 `collateral_cap_triggered` is set when, for the **single selected**
 `collateral_asset`, the computed `collateral_amount_to_transfer` exceeds the
 user's balance **of that one asset**. The code then treats that single-asset
-exhaustion as **whole-portfolio** exhaustion:
+exhaustion as **whole-position** exhaustion:
 
 1. N-08: `debt_to_cover` is scaled to `ceil(dtc * ucb / cat)` (the amount that
    corresponds to the full selected-asset balance).
 2. H-02/H-05: because `collateral_cap_triggered`, the **entire remaining
-   debt** across all assets is burned via `burn_scaled` and moved to
-   `add_reserve_deficit` (protocol bad debt), on the assumption that "all
-   collateral is seized — remaining debt is unrecoverable."
+   balance of the selected debt asset** is burned via `burn_scaled` and moved
+   to `add_reserve_deficit` (protocol bad debt), on the assumption that "all
+   collateral is seized — remaining debt is unrecoverable." The burn is
+   scoped to this leg's `debt_asset`, not to every debt asset in a
+   multi-debt portfolio.
 
 Assumption 2 is false in a multi-collateral account: the borrower can still
 hold large balances in **other** collateral assets. Only the one selected
@@ -48,25 +52,28 @@ partial-liq threshold 0.5 WAD):
   default, `is_address_whitelisted_for_liquidation` returns true when
   `LIQ_WHITELIST_FLAG` is unset) selects the **dust collateral C** and
   requests `debt_to_cover = 100` B.
-  - `collateral_amount_to_transfer = 100 × 1.05 = 105 > 100` (C balance) ⇒
-    cap triggers.
-  - N-08 scales debt to `ceil(100×100/105) = 96`.
-  - H-02/H-05 burns the **remaining ~7,904 B** as bad debt / reserve deficit.
+  - The collateral required is computed on value and converted to C tokens at
+    C's discounted price: `100 B → $100 → × 1.05 = $105 → / $0.90 = 116.67 C`.
+    `116.67 > 100` (C balance) ⇒ cap triggers.
+  - N-08 scales debt to `ceil(100×100/116.67) = 85.71`.
+  - H-02/H-05 burns the **remaining 7,914.29 B** as bad debt / reserve
+    deficit.
 
 Net effect (all asserted in the PoC):
-- Protocol loses ~$7,900 of debt (moved to deficit, socialized to the pool).
+- Protocol loses 7,914.29 B of debt (moved to reserve deficit).
 - Borrower's `total_debt_base` → ~0.
 - Borrower **keeps the 10,000 A** (worth ~$9,000) and **withdraws it
   debt-free** (`try_withdraw` succeeds).
 
 The beneficiary is the **borrower** (whose debt is erased). The liquidation
-leg is run from a Sybil liquidator the borrower funds with ~96 B and receives
-the 100 C back. In a deeply-underwater position (HF < 0.5 ⇒ close factor
+leg is run from a Sybil liquidator the borrower funds with 85.71 B and receives
+the 100 C back (worth ~$90 at the discounted price). In a deeply-underwater position (HF < 0.5 ⇒ close factor
 100%) the full remaining debt can be erased in one leg.
 
 ## Why it matters (impact)
-A borrower can shed an arbitrarily large borrowed position by liquidating a
-dust secondary collateral, converting recoverable debt into protocol deficit
+A borrower can shed their debt in the selected debt asset (in a single-
+debt position: their entire borrowed position) by liquidating a dust
+secondary collateral, converting recoverable debt into protocol deficit
 while retaining all other collateral. Direct loss of protocol value.
 
 ## Novelty / prior-art check (primary source, this tick)

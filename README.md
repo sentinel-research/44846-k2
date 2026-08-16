@@ -2,7 +2,16 @@
 
 **Single-asset cap check wrongfully forgives all remaining debt**
 (Severity as classified in the contest repo: **Critical**; flagged
-*Unreviewed* in the C4 K2 contest artifacts.)
+*Unreviewed* in the C4 K2 contest artifacts. Self-assessed **High** here, as
+a **confirmed reproduction + patch-status request** — not a claim of a novel,
+previously-unknown Critical; the branch was already public in the contest's
+V12 audit output.)
+
+**Transmitted to K2 Lend 2026-08-16** as responsible disclosure under the
+author's principal's written authorization
+([`AUTHORIZATION-44846.md`](AUTHORIZATION-44846.md), signed 2026-08-16).
+One transmission; current deployed exposure unverified (see the report's
+Section 6).
 
 Warden: **Sentinel Research** (`sentinel-research`)
 Payout address (EVM): `0x33fFD956EcA8715fb668D908d79016B61e033c8e`
@@ -32,7 +41,8 @@ Evidence map: [`EVIDENCE-INDEX.md`](EVIDENCE-INDEX.md)
 [`poc/poc_v12_44846.rs`](poc/poc_v12_44846.rs) — a Soroban test that
 constructs the exact position (multi-collateral: 10,000 A primary, 8,000 B
 debt, 100 C dust secondary), triggers a liquidation in which the liquidator
-selects the dust asset C with a tiny `debt_to_cover`, and then shows the
+selects the dust asset C with a small `debt_to_cover` (100 of 8,000),
+and then shows the
 consequence: the user's whole remaining debt is erased into reserve deficit
 and the user withdraws their remaining primary collateral A debt-free.
 The test **passes on the shipped snapshot** — it asserts the buggy end-state
@@ -41,6 +51,13 @@ deficit, and the user then withdraws their remaining primary collateral
 debt-free). Run it with the shipped contract to reproduce; a correct
 implementation (no debt erasure on single-asset exhaustion) would make it
 **fail**.
+
+Worked numbers (7-decimal tokens; C discounted to $0.90): the required
+collateral is computed on value then converted to C at its price —
+`$100 × 1.05 = $105 → / $0.90 = 116.67 C`; the liquidator repays
+`ceil(100 × 100 / 116.67) = 85.71 B` and seizes all 100 C; the remaining
+`7,914.29 B` is written to reserve deficit (scoped to the selected debt
+asset B).
 
 ### How to reproduce
 

@@ -1,14 +1,23 @@
 # Responsible disclosure — K2 Lend: single-asset collateral-cap check
-# forgives all remaining debt (multi-collateral fund loss)
+# forgives remaining debt (multi-collateral fund loss)
 
-**Severity (self-assessed): High / Critical** — direct protocol fund loss:
-recoverable debt is written off into reserve deficit while the borrower keeps
-and withdraws their other collateral.
+**Severity (self-assessed): High** — direct protocol fund loss: recoverable
+debt is written off into reserve deficit while the borrower keeps and
+withdraws their other collateral.
 
 **Author:** Sentinel Research
 
-**Status of this report:** prepared for responsible disclosure. No part of this
-report has been transmitted to any third party.
+**Framing:** this is a **confirmed reproduction + patch-status request**, not
+a claim of a novel, previously-unknown Critical. The same branch was already
+flagged as a Critical (Validity: **Unreviewed**) in the contest's own V12
+autonomous-audit output (#44846, Code4rena `2026-04-k2`). This report adds the
+first passing, end-to-end, source-traced reproduction and asks K2 to confirm
+its status in the deployed build. Current deployed exposure is **unverified**
+(Section 6).
+
+**Status:** transmitted to K2 Lend as responsible disclosure, 2026-08-16,
+under the principal's written authorization (`authorization-44846.md`, signed
+2026-08-16). Public mirror: `github.com/sentinel-research/44846-k2`.
 
 ---
 
@@ -20,16 +29,19 @@ complicit liquidator liquidate a **dust-sized secondary collateral**.
 
 The single-asset cap branch (`collateral_cap_triggered` in
 `kinetic-router/src/liquidation.rs`) treats the exhaustion of *one* selected
-collateral asset as exhaustion of the *entire* portfolio: it burns the
-**entire remaining debt** across all assets as protocol bad debt
-(`add_reserve_deficit`) even though the borrower still holds substantial
+collateral asset as exhaustion of the *entire* position: it burns the
+user's **entire remaining balance of that debt asset** as protocol bad
+de (`add_reserve_deficit`) even though the borrower still holds substantial
 balances in other collateral assets — which they then withdraw debt-free.
 
-A fully reproducible, passing PoC is provided (Section 8). The loss in the
-PoC is ~$7,900 of debt forgiven while the borrower retains ~$9,000 of
-primary collateral, using only ~96 USDC of liquidator capital. In a
-deeply underwater position (HF < 0.5, close factor 100%) the **entire**
-remaining debt can be erased in one leg.
+A fully reproducible, passing PoC is provided (Section 8). In the PoC,
+~$7,914 of debt is forgiven while the borrower retains ~$9,000 of primary
+collateral, using ~$86 of liquidator capital. (The liquidator must post the
+5% liquidation bonus on a dust asset that has dropped in price, so the bonus
+costs more of the dust asset than its face value — see the worked numbers in
+Section 4.) In a deeply underwater position where the selected asset can
+cover the full requested leg (close factor 100%, HF < 0.5), the **entire
+remaining debt of that debt asset** can be erased in one leg.
 
 This is a self-inflicted exploit: the borrower is the economic beneficiary
 and funds their own Sybil liquidator. No third party, no oracle
@@ -64,12 +76,22 @@ multi-collateral account:
    we are only liquidating that one asset.
 2. **H-02/H-05**: because `collateral_cap_triggered`, the code assumes
    "all collateral is seized — the remaining debt is unrecoverable", and
-   burns the **entire remaining debt** (`burn_scaled`) across the whole
-   position into `add_reserve_deficit` (protocol bad debt).
+   burns the **entire remaining balance of that debt asset**
+   (`burn_scaled` + `add_reserve_deficit`) — i.e. every unit of the user's
+   debt in the selected `debt_asset` that the liquidator did not pay in this
+   leg.
 
-Step 2's premise is wrong when the user holds other collateral assets. Only
-the selected asset was exhausted; the other assets remain in the position,
-recoverable, and withdrawable.
+Step 2's premise is wrong when the user holds **other collateral assets**.
+Only the single selected collateral asset was exhausted; the user's other
+collateral remains in the position, recoverable, and withdrawable — yet the
+debt is written off as if no collateral were left.
+
+**Scope (precision):** the burn applies to the **selected `debt_asset`** of
+the liquidation leg, not to every debt asset in a multi-debt portfolio. A
+separate debt asset would require its own liquidation leg. In the PoC the
+user has a single debt asset (B), so the bug erases the user's entire
+outstanding debt. In a multi-debt portfolio the same branch erases the
+remaining balance of the one selected debt asset per leg.
 
 ## 4. Exploit (proven)
 
@@ -86,24 +108,30 @@ liquidation bonus 500 bps, partial-liquidation threshold 0.5 WAD):
   `is_address_whitelisted_for_liquidation` returns true when
   `LIQ_WHITELIST_FLAG` is unset) selects the **dust collateral C** and
   requests `debt_to_cover = 100 B`:
-  - `collateral_amount_to_transfer = 100 × 1.05 = 105 > 100` (C balance)
-    ⇒ cap triggers.
-  - N-08 scales the leg to `ceil(100 × 100 / 105) = 96 B`.
-  - H-02/H-05 then burns the **remaining ~7,904 B** into reserve deficit.
+  - The collateral required is computed on **value** and converted to C
+    tokens at C's (discounted) price:
+    `100 B → $100 → × 1.05 bonus = $105 → / $0.90 = 116.67 C`.
+    `collateral_amount_to_transfer = 116.67 C > 100 C` (C balance) ⇒
+    cap triggers.
+  - N-08 scales the leg to `ceil(100 × 100 / 116.67) = 85.71 B` — the debt
+    amount that corresponds to the user's full C balance.
+  - The liquidator therefore repays only **85.71 B** and receives all **100 C**.
+  - H-02/H-05 then burns the **remaining 7,914.29 B** into reserve deficit.
 
-Result (all asserted in the PoC):
+Result (all asserted in the PoC; exact integer values at 7-decimal precision):
 
 | Party | Position before | Position after |
 |---|---|---|
-| Protocol | 8,000 B outstanding debt | ~96 B (rest → deficit) |
-| Borrower debt | 8,000 B | ~0 B |
-| Borrower collateral | 10,000 A + 100 C | 10,000 A (100 C paid to liquidator) |
+| Protocol (debt asset B) | 8,000 B outstanding debt | 85.71 B repaid; 7,914.29 B → reserve deficit |
+| Borrower debt (B) | 8,000 B | ~0 B (8,000 − 85.71 = 7,914.29 burned) |
+| Borrower collateral | 10,000 A + 100 C | 10,000 A (all 100 C paid to liquidator) |
 | Borrower action | — | `try_withdraw` 10,000 A **succeeds** |
-| Liquidator cost | — | ~96 B funded, gets 100 C back |
+| Liquidator cost | — | 85.71 B funded, gets 100 C back (~$90) |
 
-The borrower spent ~96 B to shed a ~$7,900 debt while keeping ~$9,000 of
-collateral. In a deeply underwater position (HF < 0.5 ⇒ close factor 100%)
-the full remaining debt is erased in the same single leg.
+The borrower spent ~$86 of debt to shed a ~$7,914 debt while keeping ~$9,000
+of primary collateral. In a deeply underwater position (HF < 0.5 ⇒ close
+factor 100%) where the selected asset can cover the full requested leg, the
+full remaining debt of that asset is erased in the same single leg.
 
 ## 5. Why existing guards don't stop it
 
@@ -111,7 +139,8 @@ the full remaining debt is erased in the same single leg.
   price move; the exploit uses the *intended* liquidation path, not a
   bypass.
 - **Per-asset cap (N-08)**: correctly caps the *selected* asset at its
-  balance — but the downstream deficit burn (H-02/H-05) is portfolio-wide.
+  balance — but the downstream deficit burn (H-02/H-05) writes off the
+  whole balance of the selected debt asset.
 - **`LIQ_WHITELIST_FLAG`**: when unset, **all** addresses may liquidate —
   so a Sybil liquidator is trivial. Even with the whitelist ON, the protocol
   operator whitelists addresses it controls; the economic beneficiary is
@@ -121,9 +150,10 @@ the full remaining debt is erased in the same single leg.
 - Prior audit rounds (WatchPug rev3, Halborn — both committed to the repo)
   contain **no** finding on this branch (keyword searches: single-asset /
   cap check / forgive / portfolio exhaustion / dust collateral ⇒ 0 hits).
-  An internal AI-audit note (#44846) flagged the same branch as Critical
-  but was left **Unreviewed** with no PoC; this report provides the first
-  passing end-to-end reproduction.
+  The contest's own V12 autonomous-audit output flagged the same branch as
+  Critical (note #44846) but left it **Unreviewed**, with no passing PoC.
+  This report provides the first passing, end-to-end, source-traced
+  reproduction.
 
 ## 6. Live deployment — what is and is not claimed
 
@@ -157,9 +187,9 @@ the full remaining debt is erased in the same single leg.
 
 We ask the team to check the deployed `kinetic-router`'s
 `internal_liquidation_call` for the interaction: single-asset
-`collateral_cap_triggered` ⇒ portfolio-wide `burn_scaled` into
-`add_reserve_deficit` without verifying that no other collateral assets
-remain in the position.
+`collateral_cap_triggered` ⇒ `burn_scaled` of the entire remaining
+balance of the selected debt asset into `add_reserve_deficit`, without
+verifying that no other collateral assets remain in the position.
 
 ## 7. Suggested mitigation (any one of these closes it)
 
@@ -180,17 +210,24 @@ remain in the position.
 ## 8. Reproduction
 
 ```
-cd <k2 repo, commit 2485e33 + finding commit f2dd56d>
+cd <k2 contest snapshot, base commit 2485e33>
+# 1. Build all contract WASMs (the tests import them via contractimport!):
+stellar contract build        # or: ./build.sh
+# 2. The PoC is already wired into the unit-tests crate:
+#    tests/unit-tests/src/lib.rs declares `mod poc_v12_44846;`
+#    (see commit f2dd56d, which added both the PoC file and the module line).
 cargo test -p k2-unit-tests poc_44846
-# => test poc_v12_44846::poc_v12_44846_single_asset_cap_forgives_all_debt ... ok
+# => test poc_v12_44846::poc_44846_single_asset_cap_forgives_all_debt ... ok
 ```
 
 The test (`tests/unit-tests/src/poc_v12_44846.rs`, 354 lines) constructs
 the full multi-collateral position above on the in-process Soroban
-environment, executes the liquidation leg, and asserts: (i) the remainder
-of the debt moved to `reserve_deficit`, (ii) the borrower's total debt is
-~0, (iii) the borrower's 10,000 A balance is intact, (iv)
-`try_withdraw(10,000 A)` **succeeds**.
+environment, executes the liquidation leg, and asserts the buggy end-state:
+(i) the remainder of the debt (7,914.29 B) moved to `reserve_deficit`,
+(ii) the borrower's total debt is ~0, (iii) the borrower's 10,000 A balance
+is intact, (iv) `try_withdraw(10,000 A)` **succeeds**. On a **fixed** build
+(where single-asset exhaustion does not write off the whole position's debt)
+this test **fails**.
 
 A companion observational test (poc_v12_44869) documents a related but
 separate class (unauthenticated `initialize` on fresh deploy) and is
@@ -213,4 +250,6 @@ included for context; it is not part of this finding's claim.
 ---
 
 *Prepared by Sentinel Research. All on-chain verification was read-only.
-Nothing in this package has been sent to any third party.*
+Transmitted to K2 Lend 2026-08-16 under the principal's written
+authorization (signed 2026-08-16). Public mirror:
+`github.com/sentinel-research/44846-k2`.*
