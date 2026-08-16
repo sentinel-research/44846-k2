@@ -61,8 +61,9 @@ git clone <k2-contest-snapshot-repo> && cd k2-borrow-lend-protocol
 # 3. Drop the PoC into the unit-tests crate and run it:
 cp poc_v12_44846.rs tests/unit-tests/src/
 cargo test -p k2-unit-tests poc_v12_44846
-# Expected on the shipped snapshot: the test FAILS — the user can withdraw
-# remaining collateral A after the debt has been (wrongfully) erased.
+# Expected on the shipped snapshot: the test PASSES — confirming the
+# user withdraws remaining collateral A after the debt was (wrongfully)
+# erased. A correct implementation would FAIL this test.
 ```
 
 The snapshot's `tests/` tree already contains the test harness this PoC was
